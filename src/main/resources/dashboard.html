@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job Scheduler</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --muted:#94a3b8; --text:#e2e8f0; --accent:#38bdf8; --border:#334155; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:baseline; }
+  h1 { font-size:18px; margin:0; } .muted { color:var(--muted); font-size:12px; }
+  main { padding:24px; max-width:1200px; margin:0 auto; display:grid; gap:20px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:12px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .card .n { font-size:26px; font-weight:600; } .card .l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  section { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  h2 { font-size:14px; margin:0 0 12px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  form { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; align-items:end; }
+  label { display:grid; gap:4px; font-size:12px; color:var(--muted); }
+  input, select, textarea, button { font:inherit; color:var(--text); background:#0b1220; border:1px solid var(--border); border-radius:6px; padding:7px 9px; }
+  textarea { grid-column:1/-1; min-height:60px; font-family:ui-monospace,monospace; }
+  button { cursor:pointer; background:var(--accent); color:#04222f; border:0; font-weight:600; }
+  button.small { padding:3px 8px; font-size:12px; background:#334155; color:var(--text); }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  td.err { color:#fca5a5; max-width:280px; word-break:break-word; font-size:12px; }
+  .badge { padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+  .PENDING{background:#1e3a8a} .RUNNING{background:#854d0e} .SUCCEEDED{background:#14532d} .DEAD{background:#7f1d1d} .CANCELLED{background:#374151}
+  #msg { margin-top:8px; min-height:18px; font-size:12px; } .bad { color:#fca5a5; } .ok { color:#86efac; }
+  code { font-family:ui-monospace,monospace; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Job Scheduler</h1>
+  <span class="muted" id="meta">connecting...</span>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>Enqueue a job</h2>
+    <form id="form">
+      <label>Type <select id="type"></select></label>
+      <label>Delay (seconds) <input id="delay" type="number" min="0" placeholder="0"></label>
+      <label>Cron (optional) <input id="cron" placeholder="*/5 * * * *"></label>
+      <label>Max attempts <input id="max" type="number" min="1" value="5"></label>
+      <textarea id="payload" spellcheck="false">{"message": "hello from the dashboard"}</textarea>
+      <button type="submit">Enqueue</button>
+    </form>
+    <div id="msg"></div>
+  </section>
+
+  <section>
+    <h2>Jobs <select id="filter" style="float:right"><option value="">all</option></select></h2>
+    <table>
+      <thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Run at</th><th>Attempts</th><th>Cron</th><th>Runs</th><th>Last error</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+const STATUSES = ["PENDING","RUNNING","SUCCEEDED","DEAD","CANCELLED"];
+const $ = id => document.getElementById(id);
+const filter = $("filter");
+STATUSES.forEach(s => filter.add(new Option(s.toLowerCase(), s)));
+
+function el(tag, props = {}, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  kids.forEach(k => e.append(k));
+  return e;
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json();
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+function say(text, ok) { const m = $("msg"); m.textContent = text; m.className = ok ? "ok" : "bad"; }
+
+async function refresh() {
+  try {
+    const s = await api("/api/stats");
+    $("meta").textContent = `worker ${s.workerId} · ${s.busyWorkers} busy · ${s.executedByThisWorker} executed · ${new Date(s.serverTime).toLocaleTimeString()}`;
+    const cards = $("cards"); cards.replaceChildren();
+    STATUSES.forEach(k => cards.append(el("div", {className:"card"}, el("div", {className:"n", textContent:s.counts[k] ?? 0}), el("div", {className:"l", textContent:k}))));
+    const type = $("type");
+    if (type.options.length === 0) s.jobTypes.forEach(t => type.add(new Option(t, t)));
+
+    const jobs = await api("/api/jobs?limit=100" + (filter.value ? "&status=" + filter.value : ""));
+    const rows = $("rows"); rows.replaceChildren();
+    jobs.forEach(j => {
+      const actions = el("td");
+      if (j.status === "PENDING") actions.append(el("button", {className:"small", textContent:"cancel", onclick:() => act("DELETE", j.id)}));
+      if (j.status === "DEAD" || j.status === "CANCELLED") actions.append(el("button", {className:"small", textContent:"retry", onclick:() => act("POST", j.id + "/retry")}));
+      rows.append(el("tr", {},
+        el("td", {}, el("code", {textContent:j.id.slice(0, 8), title:j.id})),
+        el("td", {textContent:j.type}),
+        el("td", {}, el("span", {className:"badge " + j.status, textContent:j.status})),
+        el("td", {textContent:new Date(j.runAt).toLocaleString()}),
+        el("td", {textContent:j.attempts + "/" + j.maxAttempts}),
+        el("td", {}, el("code", {textContent:j.cron || ""})),
+        el("td", {textContent:j.runCount}),
+        el("td", {className:"err", textContent:j.lastError || ""}),
+        actions));
+    });
+  } catch (e) { $("meta").textContent = "error: " + e.message; }
+}
+async function act(method, path) {
+  try { await api("/api/jobs/" + path, {method}); refresh(); } catch (e) { say(e.message, false); }
+}
+$("form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  let payload;
+  try { payload = JSON.parse($("payload").value || "{}"); } catch { return say("Payload is not valid JSON", false); }
+  const body = { type: $("type").value, payload, maxAttempts: Number($("max").value) || 5 };
+  if ($("delay").value) body.delaySeconds = Number($("delay").value);
+  if ($("cron").value.trim()) body.cron = $("cron").value.trim();
+  try { const j = await api("/api/jobs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)}); say("Enqueued " + j.id, true); refresh(); }
+  catch (e) { say(e.message, false); }
+});
+filter.addEventListener("change", refresh);
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
