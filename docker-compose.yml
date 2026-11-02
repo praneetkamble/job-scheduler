@@ -1,0 +1,36 @@
+# Two scheduler instances sharing one PostgreSQL database: jobs are distributed between them
+# and never executed twice. Dashboard: http://localhost:8080 (instance 1) and http://localhost:8081 (instance 2).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: scheduler
+      POSTGRES_USER: scheduler
+      POSTGRES_PASSWORD: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scheduler -d scheduler"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  scheduler-1:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: &env
+      JDBC_URL: jdbc:postgresql://postgres:5432/scheduler
+      DB_USER: scheduler
+      DB_PASSWORD: scheduler
+      WORKERS: "4"
+    ports:
+      - "8080:8080"
+
+  scheduler-2:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *env
+    ports:
+      - "8081:8080"
